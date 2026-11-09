@@ -1,0 +1,11 @@
+{
+  "name": "trading-simulator",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "nlohmann-json",
+    { "name": "librdkafka", "default-features": false },
+    "hiredis",
+    "quickfix",
+    { "name": "prometheus-cpp", "default-features": false, "features": ["pull"] }
+  ]
+}

@@ -1,0 +1,8 @@
+build/
+out/
+cmake-build-*/
+.vs/
+.vscode/
+*.user
+__pycache__/
+.venv/

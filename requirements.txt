@@ -1,0 +1,4 @@
+confluent-kafka>=2.5
+psycopg[binary]>=3.2
+simplefix>=1.0.17
+pytest>=8

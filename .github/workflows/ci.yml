@@ -1,0 +1,88 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cpp-and-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Simulator tests and FIX end-to-end tests
+        run: python -m pytest -q
+        env:
+          RFQ_GATEWAY_EXE: ${{ github.workspace }}/build/rfq_gateway
+          RFQ_GATEWAY_CFG: ${{ github.workspace }}/build/gateway.cfg
+
+      - name: Start Kafka, Redis and Postgres
+        run: |
+          docker compose -f deploy/docker-compose.yml up -d kafka redis postgres
+          timeout 90 bash -c 'until docker compose -f deploy/docker-compose.yml exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1; do sleep 2; done'
+          timeout 60 bash -c 'until docker compose -f deploy/docker-compose.yml exec -T postgres pg_isready -U rfq >/dev/null 2>&1; do sleep 2; done'
+      - name: Redis and Kafka integration tests
+        run: ctest --test-dir build -L integration --output-on-failure
+        env:
+          RFQ_REDIS_HOST: 127.0.0.1
+          RFQ_KAFKA_BROKERS: 127.0.0.1:9092
+      - name: Engine to Kafka to Postgres pipeline test
+        run: python -m pytest -q
+        working-directory: audit
+        env:
+          RFQ_DEMO_EXE: ${{ github.workspace }}/build/rfq_demo
+          RFQ_KAFKA_BROKERS: 127.0.0.1:9092
+          RFQ_PG_DSN: postgresql://rfq:rfq_dev@127.0.0.1:5432/rfq_audit
+
+      - name: Load gate
+        run: |
+          build/rfq_gateway build/gateway.cfg none none 0 &
+          gateway_pid=$!
+          timeout 20 bash -c 'until (echo > /dev/tcp/127.0.0.1/5001) 2>/dev/null; do sleep 0.2; done'
+          python -m sims.loadgen --dealers 3 --clients 1 --rate 5 --duration 2 --max-error-rate 1 > /dev/null  # warm-up
+          status=0
+          python -m sims.loadgen --dealers 4 --clients 2 --rate 100 --duration 20 \
+            --max-error-rate 0.01 --max-p99-ms 150 --json load.json --summary-md load.md || status=$?
+          kill $gateway_pid || true
+          cat load.md >> "$GITHUB_STEP_SUMMARY" || true
+          exit $status
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: load-gate
+          path: load.json
+
+  audit-writer-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rfq
+          POSTGRES_PASSWORD: rfq_dev
+          POSTGRES_DB: rfq_audit
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rfq" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r audit/requirements.txt
+      - run: python -m pytest -q
+        working-directory: audit
+        env:
+          RFQ_PG_DSN: postgresql://rfq:rfq_dev@localhost:5432/rfq_audit

@@ -1,0 +1,151 @@
+{
+  "uid": "rfq-overview",
+  "title": "RFQ Gateway",
+  "tags": ["rfq", "trading"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Open RFQs",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "rfq_open_rfqs" }]
+    },
+    {
+      "id": 2, "type": "stat", "title": "Dealers online",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "rfq_dealers_online" }]
+    },
+    {
+      "id": 3, "type": "stat", "title": "Executions / s",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops", "decimals": 1 }, "overrides": [] },
+      "targets": [{ "refId": "A", "expr": "sum(rate(rfq_executions_total[30s]))" }]
+    },
+    {
+      "id": 4, "type": "stat", "title": "Error rate (rejects + expiries per RFQ)",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "decimals": 2,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 0.01 },
+            { "color": "red", "value": 0.05 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background" },
+      "targets": [{
+        "refId": "A",
+        "expr": "(sum(rate(rfq_rejects_total[1m])) + sum(rate(rfq_expired_total[1m]))) / clamp_min(sum(rate(rfq_requests_total[1m])), 0.001)"
+      }]
+    },
+    {
+      "id": 5, "type": "stat", "title": "Dropped events (total)",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "red", "value": 1 }
+        ] } },
+        "overrides": []
+      },
+      "options": { "colorMode": "background" },
+      "targets": [{ "refId": "A", "expr": "rfq_dispatcher_dropped_events_total" }]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Throughput (per second)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "RFQs received", "expr": "sum(rate(rfq_requests_total[30s]))" },
+        { "refId": "B", "legendFormat": "quotes relayed", "expr": "sum(rate(rfq_quotes_total[30s]))" },
+        { "refId": "C", "legendFormat": "executions", "expr": "sum(rate(rfq_executions_total[30s]))" },
+        { "refId": "D", "legendFormat": "expired", "expr": "sum(rate(rfq_expired_total[30s]))" },
+        { "refId": "E", "legendFormat": "cancelled", "expr": "sum(rate(rfq_cancelled_total[30s]))" }
+      ]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Errors: rejects per second by reason",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "{{reason}}", "expr": "sum by (reason) (rate(rfq_rejects_total[1m]))" }
+      ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Gateway processing latency (p50 / p95 / p99)",
+      "description": "Time spent handling one inbound FIX message inside the gateway, including the engine decision.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "p50", "expr": "histogram_quantile(0.50, sum by (le) (rate(rfq_message_processing_seconds_bucket[1m])))" },
+        { "refId": "B", "legendFormat": "p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(rfq_message_processing_seconds_bucket[1m])))" },
+        { "refId": "C", "legendFormat": "p99", "expr": "histogram_quantile(0.99, sum by (le) (rate(rfq_message_processing_seconds_bucket[1m])))" }
+      ]
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Gateway processing p99 by FIX message type",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "35={{msg_type}}", "expr": "histogram_quantile(0.99, sum by (le, msg_type) (rate(rfq_message_processing_seconds_bucket[1m])))" }
+      ]
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "RFQ to first quote (p50 / p95 / p99)",
+      "description": "Includes dealer response time.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "p50", "expr": "histogram_quantile(0.50, sum by (le) (rate(rfq_time_to_first_quote_seconds_bucket[1m])))" },
+        { "refId": "B", "legendFormat": "p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(rfq_time_to_first_quote_seconds_bucket[1m])))" },
+        { "refId": "C", "legendFormat": "p99", "expr": "histogram_quantile(0.99, sum by (le) (rate(rfq_time_to_first_quote_seconds_bucket[1m])))" }
+      ]
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "RFQ to execution (p50 / p95 / p99)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "p50", "expr": "histogram_quantile(0.50, sum by (le) (rate(rfq_time_to_execution_seconds_bucket[1m])))" },
+        { "refId": "B", "legendFormat": "p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(rfq_time_to_execution_seconds_bucket[1m])))" },
+        { "refId": "C", "legendFormat": "p99", "expr": "histogram_quantile(0.99, sum by (le) (rate(rfq_time_to_execution_seconds_bucket[1m])))" }
+      ]
+    },
+    {
+      "id": 12, "type": "timeseries", "title": "Open RFQs and dealers online",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "legendFormat": "open RFQs", "expr": "rfq_open_rfqs" },
+        { "refId": "B", "legendFormat": "dealers online", "expr": "rfq_dealers_online" }
+      ]
+    },
+    {
+      "id": 13, "type": "timeseries", "title": "Event pipeline health (per second)",
+      "description": "Dropped events and Kafka/Redis consumer errors; both should stay at zero.",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "dropped", "expr": "rate(rfq_dispatcher_dropped_events_total[1m])" },
+        { "refId": "B", "legendFormat": "consumer errors", "expr": "rate(rfq_dispatcher_consumer_errors_total[1m])" }
+      ]
+    }
+  ]
+}
