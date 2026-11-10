@@ -32,6 +32,6 @@ if(TS_BUILD_ADAPTERS)
   add_executable(integration_tests
     integration/redis_state_store_test.cpp
     integration/kafka_publisher_test.cpp)
-  target_link_libraries(integration_tests PRIVATE rfq_messaging GTest::gtest_main)
+  target_link_libraries(integration_tests PRIVATE rfq_messaging hiredis::hiredis GTest::gtest_main)
   gtest_discover_tests(integration_tests PROPERTIES LABELS integration)
 endif()
