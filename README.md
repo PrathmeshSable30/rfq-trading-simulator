@@ -32,9 +32,9 @@ Client ──QuoteResponse (hit)──▶ Gateway ──ExecutionReport──▶
 2. The gateway creates the RFQ in the engine and forwards the request to every dealer that is logged on.
 3. Each dealer answers with a `Quote`. The engine validates it (invited dealer, full size, not expired) and the gateway relays it to the client.
 4. The client sends a `QuoteResponse` to hit one quote. The engine checks the RFQ and quote are still live and executes.
-5. Both sides get an `ExecutionReport`. Unanswered RFQs expire and the client is told.
+5. Both sides get an `ExecutionReport`. The other invited dealers are told the RFQ traded away. Unanswered RFQs expire, and the client and dealers are told.
 
-Every state change also produces an **event** (created, quoted, withdrawn, executed, expired, cancelled). Events are queued off the hot path and published to Kafka (the durable stream) and Redis (the live state). A separate writer replays the Kafka stream into PostgreSQL as the audit trail.
+Every state change also produces an **event** (created, quoted, withdrawn, superseded, executed, expired, cancelled). Events are queued off the hot path and published to Kafka (the durable stream) and Redis (the live state). A separate writer replays the Kafka stream into PostgreSQL as the audit trail.
 
 ## Architecture
 
@@ -96,7 +96,8 @@ Quote rules enforced by the engine:
 
 - Only dealers invited to the RFQ can quote.
 - A quote must cover the full requested size (partial fills are not supported).
-- A new quote from a dealer replaces that dealer's previous active quote.
+- A new quote from a dealer replaces that dealer's previous active quote. The old quote is recorded as superseded, not withdrawn, and the client is told it was replaced.
+- When a dealer logs out, its live quotes are withdrawn, so a client cannot hit a price that nobody is there to honour.
 - A quote's validity is capped at the RFQ's expiry.
 - The best quote is the lowest price for a client buying and the highest for a client selling. On equal prices the earlier quote wins.
 - Nothing can be quoted or executed once an RFQ is closed or past its deadline, even if the periodic expiry sweep has not run yet.
@@ -114,22 +115,24 @@ FIX 4.4 message map:
 | dealer to gateway | `QuoteCancel` (Z) | Withdraw one quote by the dealer's own `QuoteID`. |
 | client to gateway | `QuoteCancel` (Z) | Cancel the RFQ by `QuoteReqID`. Client receives `ExecType=4`. |
 | gateway to client | `ExecutionReport` (8) | `ExecType=C` (expired) when the deadline passes. |
+| gateway to client | `QuoteStatusReport` (AI) | A quote the client was shown is gone: withdrawn, replaced, or its dealer disconnected. `QuoteStatus=6`, reason in `Text`. |
+| gateway to dealers | `QuoteStatusReport` (AI) | The RFQ closed without trading with this dealer: traded away or cancelled (`QuoteStatus=6`), or expired (`QuoteStatus=7`). Carries the dealer's own `QuoteID` if it quoted. |
 | gateway to anyone | `BusinessMessageReject` (j) | Invalid request, wrong role, unknown id, closed RFQ, and so on, with a reason in `Text`. |
 
-Each FIX session has a `Role` (`CLIENT` or `DEALER`) in [config/gateway.cfg.in](config/gateway.cfg.in). The gateway refuses messages that do not fit the role, and a client cannot hit another client's quote. The config defines eight client sessions (`CLIENT1`..`CLIENT8`) and eight dealer sessions (`DEALER1`..`DEALER8`).
+Each FIX session has a `Role` (`CLIENT` or `DEALER`) in [config/gateway.cfg.in](config/gateway.cfg.in). The gateway refuses messages that do not fit the role, and a client cannot hit another client's quote. An `ExpireTime` more than 300 seconds away is rejected; without one the RFQ lives 10 seconds. The config defines eight client sessions (`CLIENT1`..`CLIENT8`) and eight dealer sessions (`DEALER1`..`DEALER8`).
 
 ## Components
 
 ### RFQ engine: [src/engine](src/engine)
-Pure logic with no networking, disk or threads. The caller passes the current time into every call, which keeps it deterministic and easy to test. Prices are fixed-point integers (1e-6 units). Expiry uses a time-ordered index, so a sweep touches only overdue RFQs. Every state change calls an event sink with a sequence number and timestamp. An optional id base keeps ids unique across restarts.
+Pure logic with no networking, disk or threads. The caller passes the current time into every call, which keeps it deterministic and easy to test. Prices are fixed-point integers (1e-6 units). Expiry uses a time-ordered index, so a sweep touches only overdue RFQs. Every state change calls an event sink with a sequence number and timestamp. An optional id base keeps ids unique across restarts. Closed RFQs are freed with `erase`, which the gateway calls as soon as it has sent the final reports, so memory stays flat over a long run.
 
 ### FIX gateway: [src/fix](src/fix)
-`FixGateway` implements the QuickFIX `Application` interface and translates between FIX and the engine. All entry points share one mutex, so the engine is never used concurrently even though sessions and the expiry timer run on different threads. It reports timings and outcomes through a small `GatewayObserver` interface, so FIX logic does not depend on Prometheus. The gateway can be driven in unit tests with a fake sender and fake clock, with no sockets.
+`FixGateway` implements the QuickFIX `Application` interface and translates between FIX and the engine. All entry points share one mutex, so the engine is never used concurrently even though sessions and the expiry timer run on different threads. Quotes are relayed at the engine's stored fixed-point price, so the price a client sees is exactly the price it trades at. It reports timings and outcomes through a small `GatewayObserver` interface, so FIX logic does not depend on Prometheus. The gateway can be driven in unit tests with a fake sender and fake clock, with no sockets.
 
 ### Event pipeline: [src/messaging](src/messaging) and [src/store](src/store)
 - `EventDispatcher` is a bounded queue drained by one background thread. The engine thread only enqueues. If the queue is full the event is dropped and counted rather than blocking trading. A consumer that throws is counted and does not stop the others.
 - `KafkaEventPublisher` sends each event as JSON to `rfq.events`, keyed by RFQ id so one RFQ stays ordered in one partition. Idempotence is enabled.
-- `RedisStateStore` keeps `rfq:{id}` (state, client, instrument, side, size, expiry, execution details), `rfq:{id}:quotes` and `quote:{id}` hashes, and expires them an hour after the RFQ finishes. Commands use argument vectors, so values are never interpolated into a command string.
+- `RedisStateStore` keeps `rfq:{id}` (state, client, instrument, side, size, expiry, execution details), `rfq:{id}:quotes` and `quote:{id}` hashes, and expires them an hour after the RFQ finishes. Commands use argument vectors, so values are never interpolated into a command string. If the connection drops (for example Redis restarts) it reconnects and retries the command once, which is safe because every command it sends is idempotent.
 - `event_codec` converts events to and from JSON and returns nothing for malformed input.
 
 Event example:
@@ -139,7 +142,7 @@ Event example:
  "dealer_id": "DEALER2", "price": 99512000, "qty": 5000000, "valid_until": 1793900004123000000}
 ```
 
-Event types: `RFQ_CREATED`, `QUOTE_RECEIVED`, `QUOTE_WITHDRAWN`, `RFQ_EXECUTED`, `RFQ_EXPIRED`, `RFQ_CANCELLED`.
+Event types: `RFQ_CREATED`, `QUOTE_RECEIVED`, `QUOTE_WITHDRAWN`, `QUOTE_SUPERSEDED` (carries `replaced_by`), `RFQ_EXECUTED`, `RFQ_EXPIRED`, `RFQ_CANCELLED`.
 
 ### Audit writer: [audit](audit)
 A Python Kafka consumer that writes to PostgreSQL:
@@ -274,7 +277,7 @@ The metrics port is bound on all interfaces so Prometheus in Docker can reach it
 
 Tests that need the Docker stack or built binaries skip themselves when their environment variables are not set.
 
-Current count: 53 C++ tests (2 integration), 12 Python tests for the simulators and gateway, and 11 for the audit writer.
+Current count: 63 C++ tests (3 integration), 12 Python tests for the simulators and gateway, and 12 for the audit writer.
 
 ## Performance
 
@@ -290,39 +293,22 @@ Measured on a Windows development machine, MSVC Release build, everything on one
 
 About 310,000 complete RFQs per second on one thread. With the event queue attached to the engine thread it is about 1 µs per operation and 137,000 RFQs per second. JSON encoding costs about 2.6 µs per event but runs on the background thread, not the engine thread. The p99.9 and maximum values in the benchmark are dominated by operating-system scheduling pauses, not by the engine.
 
-**Through the FIX gateway** (Kafka and Redis connected, Python simulators):
+**Through the FIX gateway** (Python simulators; Kafka and Redis connected unless noted):
 
 | Measure | Result |
 |---|---|
-| Gateway handling time per FIX message, disk-backed FIX store (before the change below) | p50 0.23 ms, p99 1.3 ms |
+| Gateway handling time per FIX message, disk-backed FIX store (the old default) | p50 0.30 to 1.29 ms, p99 3.9 to 9.8 ms (3 runs, Kafka and Redis off) |
 | Gateway handling time per FIX message, current default (in-memory FIX store) | p50 0.14 to 0.20 ms, p99 1.0 to 1.3 ms (3 runs, Kafka and Redis off) |
 | Load gate run: 4 dealers, 2 clients, 200 RFQs/s for 20 s | 3,998 of 3,998 executed, p99 RFQ-to-execution 31 ms |
 | Heavier run: 3 clients at 150 RFQs/s each (about 450/s) | 6,744 of 6,744 executed, 0 errors, p99 RFQ-to-execution 31 ms |
 
 How to read these:
 
-- The engine's decision is sub-microsecond. The gateway's 0.14 to 0.23 ms per message is mostly FIX encoding, session handling and fanning a request out to several dealers. The engine is not the bottleneck.
+- The engine's decision is sub-microsecond. The gateway's 0.14 to 0.20 ms per message is mostly FIX encoding, session handling and fanning a request out to several dealers. The engine is not the bottleneck.
 - The end-to-end figures include the single-threaded Python simulators and a dealer response delay of 0.5 to 3 ms, so they overstate what the C++ side costs.
+- These numbers were measured before the gateway started sending `QuoteStatusReport` notifications, which add one message per losing dealer per RFQ. Rerun the load generator to refresh them.
+- The CI load gate runs the gateway with Kafka and Redis off, so it checks the FIX path only. The local runs above had them connected.
 - The audit writer sustains about 130 events per second because it commits per batch and inserts row by row. It is not on the trading path, but it is the slowest stage. Batched inserts would raise it considerably.
-
-### Latency experiment: what in the FIX layer costs time
-
-`python -m sims.gateway_latency` runs the same load (4 dealers, 2 clients, 200 RFQs/s, 15 s, Kafka and Redis off) against gateway variants and reads the gateway's own per-message histogram. Three rounds, microseconds per FIX message:
-
-| Variant | p50 | p99 |
-|---|---|---|
-| Default: in-memory FIX store, `SocketNodelay=Y` | 144, 196, 192 | 993, 1071, 1324 |
-| Disk-backed FIX store | 385, 299, 1294* | 4756, 3922, 9804* |
-| In-memory store, `SocketNodelay=N` | 197, 197, 226 | 963, 1189, 4034 |
-
-\* One disk-store round was disturbed and handled only 6,224 of about 18,000 messages; treat it as an outlier.
-
-Findings:
-
-- The disk-backed FIX store roughly doubled the median and multiplied the tail by three to four. It adds nothing here, because `ResetOnLogon=Y` restarts sequence numbers at every logon, so the stored state could never be used for recovery. The default is now the in-memory store.
-- `SocketNodelay` made no clear difference to handler time. That is expected: Nagle's algorithm delays packets on the wire, which this metric does not see. It is kept on as standard practice for FIX, but its effect is unmeasured here.
-- Turning the FIX file log off did not help in an earlier two-round run.
-- Run-to-run noise is large (the default's median ranged from 144 to 196 µs), so treat differences under about 30% as inconclusive. The machine is a Windows desktop with other software running.
 
 ### Latency experiment: what in the FIX layer costs time
 
@@ -363,6 +349,7 @@ python -m sims.gateway_latency --exe build/Release/rfq_gateway --config build/ga
 - Full-size fills only. No partial fills, last look, counter-offers or multi-leg RFQs, and `QuoteRespType` other than hit/lift is rejected.
 - No TLS or authentication on FIX sessions, and no persistence of RFQ state across a gateway restart (session sequence numbers are reset on every logon, `ResetOnLogon=Y`, with an in-memory FIX store, and open RFQs are lost). Ids are made unique per launch, so the audit data stays consistent.
 - One gateway instance and one Kafka partition for the default topic. Horizontal scaling would need RFQ-id sharding.
+- A dealer's quotes are withdrawn when it logs out, but a dealer that drops in the instant between a hit and its `ExecutionReport` can still miss the fill, because nothing is persisted for resend.
 - Event queue drops on overflow. Dropped events never reach Kafka or Redis, though the engine state itself is unaffected.
 - Local-only credentials (`rfq_dev`, `admin`/`admin`) and a metrics port bound to all interfaces. Change both before any shared use.
 - Latency figures come from a single machine with simulated dealers, not a production network.
@@ -394,7 +381,7 @@ tests/           C++ unit and integration tests
 1. **Build and C++ tests**: configure with vcpkg, build, run all unit tests.
 2. **Python tests and FIX end-to-end**: start the real gateway and drive it over FIX.
 3. **Integration**: start Kafka, Redis and PostgreSQL with Docker Compose, then run the Redis and Kafka integration tests and the engine to Kafka to PostgreSQL pipeline test.
-4. **Load gate**: warm up the gateway, then run 20 seconds at 200 RFQs/s. The build fails if the error rate exceeds 1% or RFQ-to-execution p99 exceeds 150 ms. The result is posted to the run summary and the JSON is kept as an artifact.
+4. **Load gate**: warm up the gateway (Kafka and Redis off, so this measures the FIX path), then run 20 seconds at 200 RFQs/s. The build fails if the error rate exceeds 1% or RFQ-to-execution p99 exceeds 150 ms. The result is posted to the run summary and the JSON is kept as an artifact.
 5. **Audit writer tests** run in a separate job against a PostgreSQL service for fast feedback.
 
 The thresholds are deliberately generous because shared CI machines are noisy; tighten them if you run on dedicated hardware.
