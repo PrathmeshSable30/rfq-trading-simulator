@@ -6,6 +6,25 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(TS_BUILD_TESTS "Build unit tests" ON)
+
+# -DTS_SANITIZE=address  : AddressSanitizer + UndefinedBehaviorSanitizer
+# -DTS_SANITIZE=thread   : ThreadSanitizer
+# Applies to everything built here (our code and googletest), not to the vcpkg libraries.
+set(TS_SANITIZE "" CACHE STRING "Build with a sanitizer: address or thread")
+if(TS_SANITIZE)
+  if(MSVC)
+    message(FATAL_ERROR "TS_SANITIZE is only supported with GCC or Clang")
+  endif()
+  if(TS_SANITIZE STREQUAL "address")
+    set(ts_sanitize_flags -fsanitize=address,undefined -fno-sanitize-recover=undefined)
+  elseif(TS_SANITIZE STREQUAL "thread")
+    set(ts_sanitize_flags -fsanitize=thread)
+  else()
+    message(FATAL_ERROR "TS_SANITIZE must be address or thread, got '${TS_SANITIZE}'")
+  endif()
+  add_compile_options(${ts_sanitize_flags} -fno-omit-frame-pointer -g)
+  add_link_options(${ts_sanitize_flags})
+endif()
 option(TS_BUILD_ADAPTERS "Build Kafka/Redis adapters (needs vcpkg dependencies)" ON)
 
 function(ts_warnings target)

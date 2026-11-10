@@ -63,6 +63,52 @@ jobs:
           name: load-gate
           path: load.json
 
+  sanitizers:
+    # Builds our code with AddressSanitizer + UBSan, and separately with ThreadSanitizer, then runs
+    # the unit tests and a short load against the real multi-threaded gateway. Any report fails the job.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, thread]
+    env:
+      ASAN_OPTIONS: abort_on_error=1:detect_leaks=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+      TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reduce ASLR entropy
+        # Ubuntu runners use 32 bits of mmap randomness, which clashes with sanitizer shadow memory.
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DTS_SANITIZE=${{ matrix.sanitizer }}
+          -DCMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Unit tests
+        run: ctest --test-dir build -LE integration --output-on-failure
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Gateway under load
+        env:
+          # Leak checking stays on for our unit tests above; at gateway exit it would also report
+          # allocations owned by third-party libraries, which are not ours to fix.
+          ASAN_OPTIONS: abort_on_error=1:detect_leaks=0
+        run: |
+          build/rfq_gateway build/gateway.cfg none none 0 > gateway.log 2>&1 &
+          gateway_pid=$!
+          timeout 60 bash -c 'until (echo > /dev/tcp/127.0.0.1/5001) 2>/dev/null; do sleep 0.5; done'
+          # Correctness only: sanitized builds are slow, so no latency limit here.
+          python -m sims.loadgen --dealers 4 --clients 2 --rate 25 --duration 10 --max-error-rate 1 > /dev/null || true
+          kill -TERM $gateway_pid
+          status=0
+          wait $gateway_pid || status=$?
+          cat gateway.log
+          exit $status
+
   audit-writer-tests:
     runs-on: ubuntu-latest
     services:
