@@ -95,7 +95,7 @@ stateDiagram-v2
 Quote rules enforced by the engine:
 
 - Only dealers invited to the RFQ can quote.
-- A quote must cover the full requested size (partial fills are not supported).
+- A quote must cover the full requested size (partial fills are not supported). Sizes must be positive whole numbers: the gateway rejects `OrderQty=100.4` or a quote size of 99.6 instead of rounding them, so rounding can never let a quote pass the full-size check.
 - A new quote from a dealer replaces that dealer's previous active quote. The old quote is recorded as superseded, not withdrawn, and the client is told it was replaced.
 - When a dealer logs out, its live quotes are withdrawn, so a client cannot hit a price that nobody is there to honour.
 - A quote's validity is capped at the RFQ's expiry.
@@ -261,6 +261,7 @@ The gateway exposes Prometheus metrics on `:9100/metrics`. Prometheus scrapes it
 | `rfq_rejects_total{reason}` | counter | Rejected messages by reason |
 | `rfq_open_rfqs`, `rfq_dealers_online` | gauges | Current state |
 | `rfq_dispatcher_dropped_events_total`, `rfq_dispatcher_consumer_errors_total` | counters | Health of the Kafka/Redis event queue; both should stay at zero |
+| `rfq_kafka_delivery_failures_total` | counter | Events Kafka accepted locally but could not deliver to the broker. `produce()` only queues a message, so this is the signal that the audit stream is actually failing. The gateway polls for delivery reports every second. |
 
 The dashboard shows throughput, an error-rate tile (rejects plus expiries per RFQ), p50/p95/p99 for each histogram, p99 by FIX message type, rejects by reason, open RFQs, dealers online and pipeline health. A test checks that every metric the dashboard queries is actually exported.
 
@@ -277,7 +278,9 @@ The metrics port is bound on all interfaces so Prometheus in Docker can reach it
 
 Tests that need the Docker stack or built binaries skip themselves when their environment variables are not set.
 
-Current count: 63 C++ tests (3 integration), 12 Python tests for the simulators and gateway, and 12 for the audit writer.
+**Sanitizers.** Configure with `-DTS_SANITIZE=address` (AddressSanitizer plus UndefinedBehaviorSanitizer) or `-DTS_SANITIZE=thread` (ThreadSanitizer), with GCC or Clang. CI builds both, runs the unit tests, and drives the real multi-threaded gateway with the load generator; any sanitizer report fails the build. The vcpkg libraries themselves are not instrumented.
+
+Current count: 66 C++ tests (3 integration), 12 Python tests for the simulators and gateway, and 12 for the audit writer.
 
 ## Performance
 
@@ -382,6 +385,7 @@ tests/           C++ unit and integration tests
 2. **Python tests and FIX end-to-end**: start the real gateway and drive it over FIX.
 3. **Integration**: start Kafka, Redis and PostgreSQL with Docker Compose, then run the Redis and Kafka integration tests and the engine to Kafka to PostgreSQL pipeline test.
 4. **Load gate**: warm up the gateway (Kafka and Redis off, so this measures the FIX path), then run 20 seconds at 200 RFQs/s. The build fails if the error rate exceeds 1% or RFQ-to-execution p99 exceeds 150 ms. The result is posted to the run summary and the JSON is kept as an artifact.
-5. **Audit writer tests** run in a separate job against a PostgreSQL service for fast feedback.
+5. **Sanitizers**: a separate job builds with ASan+UBSan and with TSan, runs the unit tests, and puts the gateway under load. It fails on any sanitizer report.
+6. **Audit writer tests** run in a separate job against a PostgreSQL service for fast feedback.
 
 The thresholds are deliberately generous because shared CI machines are noisy; tighten them if you run on dedicated hardware.
