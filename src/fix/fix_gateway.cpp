@@ -41,6 +41,17 @@ std::optional<std::uint64_t> parse_id(const std::string& s) {
 }
 
 Price to_price(double px) { return static_cast<Price>(std::llround(px * kPriceScale)); }
+
+// FIX carries quantities as decimals, but the engine trades whole units. Rounding would let a
+// dealer quoting 99.6 pass a full-size check for 100, so anything that is not a whole number is
+// refused instead.
+std::optional<Qty> whole_qty(double v) {
+  constexpr double kMaxQty = 1e15;  // far above any real size, well inside int64
+  if (!std::isfinite(v) || v <= 0 || v > kMaxQty || v != std::floor(v)) return std::nullopt;
+  return static_cast<Qty>(v);
+}
+
+bool valid_price(double px) { return std::isfinite(px) && px > 0 && px < 1e12; }
 double from_price(Price p) { return static_cast<double>(p) / kPriceScale; }
 
 TimestampNs to_ns(const FIX::UtcTimeStamp& t) {
@@ -245,10 +256,12 @@ void FixGateway::onMessage(const FIX44::QuoteRequest& m, const FIX::SessionID& s
   for (const auto& [dealer, session] : dealers_online_) dealer_ids.push_back(dealer);
   if (dealer_ids.empty()) return reject(sid, "R", "no dealers online");
 
+  const auto rfq_qty = whole_qty(qty.getValue());
+  if (!rfq_qty) return reject(sid, "R", "OrderQty must be a positive whole number");
+
   const Side rfq_side = side == FIX::Side_BUY ? Side::Buy : Side::Sell;
   const auto created = engine_.submit_rfq(
-      RfqRequest{sid.getTargetCompID().getString(), symbol.getString(), rfq_side,
-                 static_cast<Qty>(std::llround(qty.getValue())), expires, dealer_ids},
+      RfqRequest{sid.getTargetCompID().getString(), symbol.getString(), rfq_side, *rfq_qty, expires, dealer_ids},
       now);
   if (!created.ok()) return reject(sid, "R", to_string(created.error));
 
@@ -293,6 +306,9 @@ void FixGateway::onMessage(const FIX44::Quote& m, const FIX::SessionID& sid) {
 
   const double px = buy ? offer_px.getValue() : bid_px.getValue();
   const double size = buy ? offer_size.getValue() : bid_size.getValue();
+  const auto quote_qty = whole_qty(size);
+  if (!quote_qty) return reject(sid, "S", "quote size must be a positive whole number");
+  if (!valid_price(px)) return reject(sid, "S", "quote price must be a positive number");
 
   TimestampNs valid_until = std::numeric_limits<TimestampNs>::max();
   FIX::ValidUntilTime valid;
@@ -310,7 +326,7 @@ void FixGateway::onMessage(const FIX44::Quote& m, const FIX::SessionID& sid) {
   }
 
   const auto quoted = engine_.submit_quote(
-      *rfq_id, QuoteInput{dealer, to_price(px), static_cast<Qty>(std::llround(size)), valid_until}, now);
+      *rfq_id, QuoteInput{dealer, to_price(px), *quote_qty, valid_until}, now);
   if (!quoted.ok()) return reject(sid, "S", to_string(quoted.error));
 
   const QuoteId qid = quoted.value;

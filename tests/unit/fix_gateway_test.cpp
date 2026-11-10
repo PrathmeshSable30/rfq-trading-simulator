@@ -265,6 +265,24 @@ TEST_F(FixGatewayTest, QuotePriceIsRelayedAsStored) {
   EXPECT_DOUBLE_EQ(std::stod(field(fill[0]->message, FIX::FIELD::LastPx)), 99.123457);
 }
 
+TEST_F(FixGatewayTest, FractionalRequestSizeIsRejected) {
+  request("CLIENT1", "REQ-1", '1', 100.4);
+  const auto rejects = to("CLIENT1", "j");
+  ASSERT_EQ(rejects.size(), 1u);
+  EXPECT_EQ(field(rejects[0]->message, FIX::FIELD::Text), "OrderQty must be a positive whole number");
+  EXPECT_EQ(gateway->open_rfqs(), 0u);
+}
+
+TEST_F(FixGatewayTest, FractionalQuoteSizeCannotPassTheFullSizeCheck) {
+  request("CLIENT1", "REQ-1", '1', 100);
+  quote("DEALER1", "1", "DQ-1", 99.5, /*offer=*/true, 99.6);  // would round up to 100
+
+  const auto rejects = to("DEALER1", "j");
+  ASSERT_EQ(rejects.size(), 1u);
+  EXPECT_EQ(field(rejects[0]->message, FIX::FIELD::Text), "quote size must be a positive whole number");
+  EXPECT_TRUE(to("CLIENT1", "S").empty());
+}
+
 TEST_F(FixGatewayTest, ExpireTimeTooFarAheadIsRejected) {
   FIX44::QuoteRequest r{FIX::QuoteReqID("REQ-1")};
   FIX44::QuoteRequest::NoRelatedSym g;
