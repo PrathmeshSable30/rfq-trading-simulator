@@ -76,6 +76,12 @@ class RfqEngine {
   // Expires every open RFQ whose deadline is <= now and returns their ids.
   std::vector<RfqId> expire(TimestampNs now);
 
+  // Frees a closed RFQ and its quotes. Open RFQs are kept and the call returns false, so a
+  // caller cannot lose live state by mistake. Without this the engine would keep every RFQ forever.
+  bool erase(RfqId rfq_id);
+
+  std::size_t size() const noexcept { return rfqs_.size(); }
+
   const Rfq* find(RfqId rfq_id) const;
   std::optional<Quote> best_quote(RfqId rfq_id, TimestampNs now) const;
 

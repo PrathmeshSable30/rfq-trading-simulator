@@ -206,6 +206,35 @@ TEST_F(RfqEngineTest, EventSequenceNumbersAreStrictlyIncreasing) {
   }
 }
 
+TEST_F(RfqEngineTest, EraseFreesClosedRfqAndItsQuotes) {
+  const RfqId id = open_rfq();
+  const auto q = engine.submit_quote(id, make_quote("A", 100), kT0 + 1);
+  ASSERT_TRUE(engine.execute(id, q.value, kT0 + 2).ok());
+
+  EXPECT_TRUE(engine.erase(id));
+  EXPECT_EQ(engine.size(), 0u);
+  EXPECT_EQ(engine.find(id), nullptr);
+  EXPECT_EQ(engine.withdraw_quote(q.value, kT0 + 3), ErrorCode::UnknownQuote);
+  EXPECT_FALSE(engine.erase(id));
+}
+
+TEST_F(RfqEngineTest, EraseKeepsOpenRfqs) {
+  const RfqId id = open_rfq();
+  EXPECT_FALSE(engine.erase(id));
+  EXPECT_EQ(engine.size(), 1u);
+  EXPECT_EQ(engine.find(id)->state, RfqState::Open);
+}
+
+TEST_F(RfqEngineTest, MemoryStaysFlatWhenClosedRfqsAreErased) {
+  for (int i = 0; i < 1'000; ++i) {
+    const RfqId id = open_rfq();
+    const auto q = engine.submit_quote(id, make_quote("A", 100), kT0 + 1);
+    ASSERT_TRUE(engine.execute(id, q.value, kT0 + 2).ok());
+    ASSERT_TRUE(engine.erase(id));
+  }
+  EXPECT_EQ(engine.size(), 0u);
+}
+
 TEST_F(RfqEngineTest, IdBaseOffsetsGeneratedIds) {
   RfqEngine based({}, 1'000);
   const auto rfq = based.submit_rfq(make_request(), kT0);

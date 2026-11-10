@@ -151,6 +151,15 @@ std::vector<RfqId> RfqEngine::expire(TimestampNs now) {
   return expired;
 }
 
+bool RfqEngine::erase(RfqId rfq_id) {
+  const auto it = rfqs_.find(rfq_id);
+  if (it == rfqs_.end() || !is_terminal(it->second.state)) return false;
+
+  for (const Quote& q : it->second.quotes) quote_index_.erase(q.id);
+  rfqs_.erase(it);
+  return true;
+}
+
 const Rfq* RfqEngine::find(RfqId rfq_id) const {
   const auto it = rfqs_.find(rfq_id);
   return it == rfqs_.end() ? nullptr : &it->second;
