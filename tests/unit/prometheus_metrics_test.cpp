@@ -79,4 +79,12 @@ TEST_F(PrometheusMetricsTest, DispatcherTotalsAreExportedAsIncreases) {
   EXPECT_TRUE(has("rfq_dispatcher_consumer_errors_total 1\n"));
 }
 
+TEST_F(PrometheusMetricsTest, KafkaDeliveryFailuresAreExportedAsIncreases) {
+  EXPECT_TRUE(has("rfq_kafka_delivery_failures_total 0\n"));
+  metrics.update_kafka(3);
+  metrics.update_kafka(3);
+  metrics.update_kafka(5);
+  EXPECT_TRUE(has("rfq_kafka_delivery_failures_total 5\n"));
+}
+
 }  // namespace

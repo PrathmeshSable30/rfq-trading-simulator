@@ -138,13 +138,14 @@
     },
     {
       "id": 13, "type": "timeseries", "title": "Event pipeline health (per second)",
-      "description": "Dropped events and Kafka/Redis consumer errors; both should stay at zero.",
+      "description": "Dropped events, Kafka/Redis consumer errors and Kafka delivery failures; all should stay at zero.",
       "gridPos": { "h": 7, "w": 12, "x": 12, "y": 28 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
       "targets": [
         { "refId": "A", "legendFormat": "dropped", "expr": "rate(rfq_dispatcher_dropped_events_total[1m])" },
-        { "refId": "B", "legendFormat": "consumer errors", "expr": "rate(rfq_dispatcher_consumer_errors_total[1m])" }
+        { "refId": "B", "legendFormat": "consumer errors", "expr": "rate(rfq_dispatcher_consumer_errors_total[1m])" },
+        { "refId": "C", "legendFormat": "Kafka delivery failures", "expr": "rate(rfq_kafka_delivery_failures_total[1m])" }
       ]
     }
   ]

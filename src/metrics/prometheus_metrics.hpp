@@ -31,6 +31,9 @@ class PrometheusMetrics : public GatewayObserver {
   // Takes running totals from the event dispatcher and exports the increase since the last call.
   void update_dispatcher(std::uint64_t dropped_total, std::uint64_t consumer_errors_total);
 
+  // Same, for messages Kafka accepted locally but then failed to deliver to the broker.
+  void update_kafka(std::uint64_t delivery_failures_total);
+
  private:
   std::shared_ptr<prometheus::Registry> registry_;  // keeps the metrics below alive
   prometheus::Family<prometheus::Histogram>& processing_family_;
@@ -46,8 +49,10 @@ class PrometheusMetrics : public GatewayObserver {
   prometheus::Gauge& dealers_online_;
   prometheus::Counter& dispatcher_dropped_;
   prometheus::Counter& dispatcher_errors_;
+  prometheus::Counter& kafka_delivery_failures_;
   std::uint64_t last_dropped_{0};
   std::uint64_t last_errors_{0};
+  std::uint64_t last_kafka_failures_{0};
 };
 
 }  // namespace rfq

@@ -17,6 +17,11 @@ class KafkaEventPublisher : public EventConsumer {
   void on_event(const Event& event) override;
   void flush(int timeout_ms);
 
+  // Serves delivery reports. produce() only queues a message; whether it reached the broker is
+  // known later, so call this periodically even when no events are flowing. Thread-safe.
+  void poll(int timeout_ms = 0);
+
+  // Messages that were queued but could not be delivered (broker down past the retry timeout).
   std::uint64_t delivery_failures() const noexcept;
 
  private:

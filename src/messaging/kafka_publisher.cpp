@@ -76,6 +76,8 @@ void KafkaEventPublisher::on_event(const Event& event) {
 
 void KafkaEventPublisher::flush(int timeout_ms) { impl_->producer->flush(timeout_ms); }
 
+void KafkaEventPublisher::poll(int timeout_ms) { impl_->producer->poll(timeout_ms); }
+
 std::uint64_t KafkaEventPublisher::delivery_failures() const noexcept {
   return impl_->report.failures.load();
 }

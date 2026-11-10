@@ -54,7 +54,11 @@ int main(int argc, char** argv) {
 
   try {
     std::vector<std::shared_ptr<rfq::EventConsumer>> consumers;
-    if (brokers != "none") consumers.push_back(std::make_shared<rfq::KafkaEventPublisher>(brokers, "rfq.events"));
+    std::shared_ptr<rfq::KafkaEventPublisher> kafka;
+    if (brokers != "none") {
+      kafka = std::make_shared<rfq::KafkaEventPublisher>(brokers, "rfq.events");
+      consumers.push_back(kafka);
+    }
     if (redis_host != "none") consumers.push_back(std::make_shared<rfq::RedisStateStore>(redis_host, 6379));
 
     rfq::EventDispatcher dispatcher(consumers, 1 << 20);
@@ -104,13 +108,19 @@ int main(int argc, char** argv) {
     while (!g_stop) {
       std::this_thread::sleep_for(std::chrono::milliseconds(20));
       gateway.tick();
-      if (metrics && std::chrono::steady_clock::now() >= next_stats) {
-        metrics->update_dispatcher(dispatcher.dropped(), dispatcher.consumer_errors());
+      if (std::chrono::steady_clock::now() >= next_stats) {
+        if (kafka) kafka->poll(0);  // collect delivery reports even when no events are flowing
+        if (metrics) {
+          metrics->update_dispatcher(dispatcher.dropped(), dispatcher.consumer_errors());
+          if (kafka) metrics->update_kafka(kafka->delivery_failures());
+        }
         next_stats += std::chrono::seconds(1);
       }
     }
     acceptor.stop();
-    std::printf("stopped; events dropped=%llu\n", static_cast<unsigned long long>(dispatcher.dropped()));
+    std::printf("stopped; events dropped=%llu kafka delivery failures=%llu\n",
+                static_cast<unsigned long long>(dispatcher.dropped()),
+                static_cast<unsigned long long>(kafka ? kafka->delivery_failures() : 0));
   } catch (const std::exception& e) {
     std::fprintf(stderr, "fatal: %s\n", e.what());
     return 1;

@@ -81,7 +81,12 @@ PrometheusMetrics::PrometheusMetrics(std::shared_ptr<prometheus::Registry> regis
                              .Name("rfq_dispatcher_consumer_errors_total")
                              .Help("Exceptions raised by Kafka/Redis event consumers")
                              .Register(*registry)
-                             .Add({})) {}
+                             .Add({})),
+      kafka_delivery_failures_(prometheus::BuildCounter()
+                                   .Name("rfq_kafka_delivery_failures_total")
+                                   .Help("Events Kafka accepted locally but could not deliver to the broker")
+                                   .Register(*registry)
+                                   .Add({})) {}
 
 void PrometheusMetrics::on_message(const char* fix_msg_type, double processing_seconds) {
   processing_family_.Add({{"msg_type", fix_msg_type}}, kProcessingBuckets).Observe(processing_seconds);
@@ -108,6 +113,13 @@ void PrometheusMetrics::update_dispatcher(std::uint64_t dropped_total, std::uint
   }
   last_dropped_ = dropped_total;
   last_errors_ = consumer_errors_total;
+}
+
+void PrometheusMetrics::update_kafka(std::uint64_t delivery_failures_total) {
+  if (delivery_failures_total > last_kafka_failures_) {
+    kafka_delivery_failures_.Increment(static_cast<double>(delivery_failures_total - last_kafka_failures_));
+  }
+  last_kafka_failures_ = delivery_failures_total;
 }
 
 }  // namespace rfq
