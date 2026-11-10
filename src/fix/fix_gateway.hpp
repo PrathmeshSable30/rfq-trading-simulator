@@ -24,6 +24,10 @@ namespace rfq {
 //   dealer  -> Quote (S)                 gateway -> client:  Quote (S)
 //   client  -> QuoteResponse (AJ) = hit  gateway -> client + winning dealer: ExecutionReport (8)
 //   client  -> QuoteCancel (Z)           cancels the RFQ; dealer QuoteCancel withdraws one quote
+// Status notifications use QuoteStatusReport (AI):
+//   to the client when a quote it was shown is withdrawn, replaced, or its dealer disconnects;
+//   to every other invited dealer when the RFQ trades away, is cancelled, or expires.
+// A dealer that logs out has its live quotes withdrawn, so they can no longer be hit.
 // Session roles come from the custom "Role=CLIENT|DEALER" setting of each session.
 // All entry points are serialised by one mutex, so the engine is never used concurrently.
 class FixGateway : public FIX::Application, public FIX::MessageCracker {
@@ -67,6 +71,7 @@ class FixGateway : public FIX::Application, public FIX::MessageCracker {
     std::string client_req_id;
     std::string symbol;
     Side side{};
+    std::vector<std::string> dealers;  // invited dealers (their comp ids)
     std::vector<QuoteId> quote_ids;
     std::chrono::steady_clock::time_point received_at;
     bool quoted{false};
@@ -85,6 +90,9 @@ class FixGateway : public FIX::Application, public FIX::MessageCracker {
   void exec_report(const FIX::SessionID& to, const std::string& order_id, const std::string& cl_ord_id,
                    char exec_type, char ord_status, char side, const std::string& symbol, Price price,
                    Qty qty, const std::string& text);
+  void quote_removed(const RfqInfo& rfq, QuoteId quote_id, const std::string& reason);
+  void rfq_closed(RfqId rfq_id, const RfqInfo& rfq, int quote_status, const std::string& reason,
+                  const std::string& except_dealer = {});
   void forget(RfqId rfq_id);
   void publish_gauges();
 

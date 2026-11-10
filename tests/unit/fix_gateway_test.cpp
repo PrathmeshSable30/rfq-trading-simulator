@@ -10,6 +10,7 @@
 #include <quickfix/fix44/QuoteCancel.h>
 #include <quickfix/fix44/QuoteRequest.h>
 #include <quickfix/fix44/QuoteResponse.h>
+#include <quickfix/fix44/QuoteStatusReport.h>
 
 #include "fix/fix_gateway.hpp"
 
@@ -197,6 +198,89 @@ TEST_F(FixGatewayTest, HittingBestQuoteExecutesAndNotifiesBothSides) {
   EXPECT_EQ(to("CLIENT1", "j").size(), 1u);
 }
 
+TEST_F(FixGatewayTest, LosingDealerIsToldTheRfqTradedAway) {
+  request("CLIENT1", "REQ-1");
+  quote("DEALER1", "1", "DQ-1", 99.6);
+  quote("DEALER2", "1", "DQ-2", 99.4);
+  hit("CLIENT1", "2");
+
+  const auto loser = to("DEALER1", "AI");
+  ASSERT_EQ(loser.size(), 1u);
+  EXPECT_EQ(field(loser[0]->message, FIX::FIELD::QuoteReqID), "1");
+  EXPECT_EQ(field(loser[0]->message, FIX::FIELD::QuoteID), "DQ-1");  // the dealer's own id
+  EXPECT_EQ(field(loser[0]->message, FIX::FIELD::QuoteStatus), "6");
+  EXPECT_EQ(field(loser[0]->message, FIX::FIELD::Text), "traded away");
+  EXPECT_TRUE(to("DEALER2", "AI").empty());  // the winner gets its fill instead
+}
+
+TEST_F(FixGatewayTest, ReplacedQuoteIsReportedToClientAndCannotBeHit) {
+  request("CLIENT1", "REQ-1");
+  quote("DEALER1", "1", "DQ-1", 99.6);
+  quote("DEALER1", "1", "DQ-2", 99.5);
+
+  const auto removed = to("CLIENT1", "AI");
+  ASSERT_EQ(removed.size(), 1u);
+  EXPECT_EQ(field(removed[0]->message, FIX::FIELD::QuoteReqID), "REQ-1");
+  EXPECT_EQ(field(removed[0]->message, FIX::FIELD::QuoteID), "1");
+  EXPECT_EQ(field(removed[0]->message, FIX::FIELD::Text), "replaced by quote 2");
+  EXPECT_EQ(to("CLIENT1", "S").size(), 2u);
+
+  hit("CLIENT1", "1");
+  EXPECT_EQ(to("CLIENT1", "j").size(), 1u);
+  hit("CLIENT1", "2");
+  EXPECT_EQ(to("CLIENT1", "8").size(), 1u);
+}
+
+TEST_F(FixGatewayTest, DealerLogoutWithdrawsItsQuotes) {
+  request("CLIENT1", "REQ-1");
+  quote("DEALER1", "1", "DQ-1", 99.4);
+  quote("DEALER2", "1", "DQ-2", 99.6);
+  gateway->onLogout(sid("DEALER1"));
+
+  const auto removed = to("CLIENT1", "AI");
+  ASSERT_EQ(removed.size(), 1u);
+  EXPECT_EQ(field(removed[0]->message, FIX::FIELD::QuoteID), "1");
+  EXPECT_EQ(field(removed[0]->message, FIX::FIELD::Text), "dealer disconnected");
+
+  hit("CLIENT1", "1");  // the offline dealer could never confirm this trade
+  EXPECT_EQ(to("CLIENT1", "j").size(), 1u);
+  EXPECT_TRUE(to("DEALER1", "8").empty());
+
+  hit("CLIENT1", "2");  // the online dealer's quote is still good
+  EXPECT_EQ(to("CLIENT1", "8").size(), 1u);
+  EXPECT_TRUE(to("DEALER1", "AI").empty());  // offline dealers are not sent anything
+}
+
+TEST_F(FixGatewayTest, QuotePriceIsRelayedAsStored) {
+  request("CLIENT1", "REQ-1");
+  quote("DEALER1", "1", "DQ-1", 99.1234567);  // finer than the engine's 1e-6 tick
+
+  const auto quotes = to("CLIENT1", "S");
+  ASSERT_EQ(quotes.size(), 1u);
+  EXPECT_DOUBLE_EQ(std::stod(field(quotes[0]->message, FIX::FIELD::OfferPx)), 99.123457);
+
+  hit("CLIENT1", "1");
+  const auto fill = to("CLIENT1", "8");
+  ASSERT_EQ(fill.size(), 1u);
+  EXPECT_DOUBLE_EQ(std::stod(field(fill[0]->message, FIX::FIELD::LastPx)), 99.123457);
+}
+
+TEST_F(FixGatewayTest, ExpireTimeTooFarAheadIsRejected) {
+  FIX44::QuoteRequest r{FIX::QuoteReqID("REQ-1")};
+  FIX44::QuoteRequest::NoRelatedSym g;
+  g.set(FIX::Symbol("BOND1"));
+  g.set(FIX::Side('1'));
+  g.set(FIX::OrderQty(1'000'000));
+  g.set(FIX::ExpireTime(FIX::UtcTimeStamp(static_cast<std::time_t>(now / kSec) + 3600, 0, 3)));
+  r.addGroup(g);
+  gateway->fromApp(r, sid("CLIENT1"));
+
+  const auto rejects = to("CLIENT1", "j");
+  ASSERT_EQ(rejects.size(), 1u);
+  EXPECT_EQ(field(rejects[0]->message, FIX::FIELD::Text), "ExpireTime is more than 300 s away");
+  EXPECT_EQ(gateway->open_rfqs(), 0u);
+}
+
 TEST_F(FixGatewayTest, ClientCannotHitAnotherClientsQuote) {
   request("CLIENT1", "REQ-1");
   quote("DEALER1", "1", "DQ-1", 99.5);
@@ -213,6 +297,10 @@ TEST_F(FixGatewayTest, WithdrawnQuoteCannotBeHit) {
 
   FIX44::QuoteCancel c{FIX::QuoteID("DQ-1"), FIX::QuoteCancelType(FIX::QuoteCancelType_CANCEL_FOR_ONE_OR_MORE_SECURITIES)};
   gateway->fromApp(c, sid("DEALER1"));
+  const auto removed = to("CLIENT1", "AI");
+  ASSERT_EQ(removed.size(), 1u);
+  EXPECT_EQ(field(removed[0]->message, FIX::FIELD::Text), "withdrawn by dealer");
+
   hit("CLIENT1", "1");
 
   EXPECT_EQ(to("CLIENT1", "j").size(), 1u);
@@ -230,6 +318,13 @@ TEST_F(FixGatewayTest, ClientCancelSendsCancelledReport) {
   ASSERT_EQ(reports.size(), 1u);
   EXPECT_EQ(field(reports[0]->message, FIX::FIELD::ExecType), "4");
   EXPECT_EQ(gateway->open_rfqs(), 0u);
+
+  for (const char* dealer : {"DEALER1", "DEALER2"}) {
+    const auto status = to(dealer, "AI");
+    ASSERT_EQ(status.size(), 1u);
+    EXPECT_EQ(field(status[0]->message, FIX::FIELD::Text), "RFQ cancelled by client");
+    EXPECT_EQ(field(status[0]->message, FIX::FIELD::QuoteID), "");  // neither dealer had quoted
+  }
 }
 
 TEST_F(FixGatewayTest, TickExpiresOverdueRfqs) {
@@ -244,6 +339,11 @@ TEST_F(FixGatewayTest, TickExpiresOverdueRfqs) {
   ASSERT_EQ(reports.size(), 1u);
   EXPECT_EQ(field(reports[0]->message, FIX::FIELD::ExecType), "C");
   EXPECT_EQ(gateway->open_rfqs(), 0u);
+
+  const auto status = to("DEALER1", "AI");
+  ASSERT_EQ(status.size(), 1u);
+  EXPECT_EQ(field(status[0]->message, FIX::FIELD::QuoteStatus), "7");
+  EXPECT_EQ(to("DEALER2", "AI").size(), 1u);
 }
 
 TEST_F(FixGatewayTest, DealerCannotRequestAndClientCannotQuote) {

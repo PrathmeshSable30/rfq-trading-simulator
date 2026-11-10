@@ -13,12 +13,19 @@
 #include <quickfix/fix44/QuoteCancel.h>
 #include <quickfix/fix44/QuoteRequest.h>
 #include <quickfix/fix44/QuoteResponse.h>
+#include <quickfix/fix44/QuoteStatusReport.h>
 
 namespace rfq {
 
 namespace {
 
 constexpr TimestampNs kDefaultRfqLifetimeNs = 10'000'000'000;
+// Longest ExpireTime a client may ask for. Without a cap an RFQ could stay open indefinitely.
+constexpr TimestampNs kMaxRfqLifetimeNs = 300'000'000'000;
+
+// QuoteStatus (297) values used in QuoteStatusReport.
+constexpr int kQuoteStatusRemovedFromMarket = 6;
+constexpr int kQuoteStatusExpired = 7;
 
 TimestampNs system_now_ns() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -85,8 +92,19 @@ void FixGateway::onLogon(const FIX::SessionID& sid) {
 
 void FixGateway::onLogout(const FIX::SessionID& sid) {
   std::lock_guard lock(mu_);
-  const auto it = dealers_online_.find(sid.getTargetCompID().getString());
+  const std::string dealer = sid.getTargetCompID().getString();
+  const auto it = dealers_online_.find(dealer);
   if (it != dealers_online_.end() && it->second == sid) dealers_online_.erase(it);
+
+  if (has_role(sid, Role::Dealer)) {
+    // A disconnected dealer cannot confirm a trade, so its live quotes must not stay hittable.
+    const TimestampNs now = clock_();
+    for (const auto& [qid, info] : quotes_) {
+      if (info.dealer != dealer || engine_.withdraw_quote(qid, now) != ErrorCode::Ok) continue;
+      const auto rfq = rfqs_.find(info.rfq_id);
+      if (rfq != rfqs_.end()) quote_removed(rfq->second, qid, "dealer disconnected");
+    }
+  }
   publish_gauges();
 }
 
@@ -145,7 +163,42 @@ void FixGateway::exec_report(const FIX::SessionID& to, const std::string& order_
   send(er, to);
 }
 
+void FixGateway::quote_removed(const RfqInfo& rfq, QuoteId quote_id, const std::string& reason) {
+  FIX44::QuoteStatusReport r;
+  r.setField(FIX::QuoteReqID(rfq.client_req_id));
+  r.setField(FIX::QuoteID(std::to_string(quote_id)));
+  r.setField(FIX::QuoteStatus(kQuoteStatusRemovedFromMarket));
+  r.setField(FIX::Symbol(rfq.symbol));
+  r.setField(FIX::Text(reason));
+  send(r, rfq.client);
+}
+
+void FixGateway::rfq_closed(RfqId rfq_id, const RfqInfo& rfq, int quote_status, const std::string& reason,
+                            const std::string& except_dealer) {
+  for (const std::string& dealer : rfq.dealers) {
+    if (dealer == except_dealer) continue;
+    const auto online = dealers_online_.find(dealer);
+    if (online == dealers_online_.end()) continue;
+
+    FIX44::QuoteStatusReport r;
+    r.setField(FIX::QuoteReqID(std::to_string(rfq_id)));
+    // Name the dealer's own latest quote, if it sent one.
+    for (auto q = rfq.quote_ids.rbegin(); q != rfq.quote_ids.rend(); ++q) {
+      const auto info = quotes_.find(*q);
+      if (info != quotes_.end() && info->second.dealer == dealer) {
+        r.setField(FIX::QuoteID(info->second.dealer_quote_id));
+        break;
+      }
+    }
+    r.setField(FIX::QuoteStatus(quote_status));
+    r.setField(FIX::Symbol(rfq.symbol));
+    r.setField(FIX::Text(reason));
+    send(r, online->second);
+  }
+}
+
 void FixGateway::forget(RfqId rfq_id) {
+  engine_.erase(rfq_id);
   const auto it = rfqs_.find(rfq_id);
   if (it == rfqs_.end()) return;
 
@@ -186,6 +239,7 @@ void FixGateway::onMessage(const FIX44::QuoteRequest& m, const FIX::SessionID& s
   TimestampNs expires = now + kDefaultRfqLifetimeNs;
   FIX::ExpireTime expire_time;
   if (group.getFieldIfSet(expire_time)) expires = to_ns(expire_time.getValue());
+  if (expires - now > kMaxRfqLifetimeNs) return reject(sid, "R", "ExpireTime is more than 300 s away");
 
   std::vector<std::string> dealer_ids;
   for (const auto& [dealer, session] : dealers_online_) dealer_ids.push_back(dealer);
@@ -199,7 +253,7 @@ void FixGateway::onMessage(const FIX44::QuoteRequest& m, const FIX::SessionID& s
   if (!created.ok()) return reject(sid, "R", to_string(created.error));
 
   const RfqId rfq_id = created.value;
-  rfqs_[rfq_id] = RfqInfo{sid, req_id.getString(), symbol.getString(), rfq_side, {},
+  rfqs_[rfq_id] = RfqInfo{sid, req_id.getString(), symbol.getString(), rfq_side, dealer_ids, {},
                           std::chrono::steady_clock::now(), false};
   client_req_index_[{sid.toString(), req_id.getString()}] = rfq_id;
   if (observer_) observer_->on_rfq_created();
@@ -246,6 +300,15 @@ void FixGateway::onMessage(const FIX44::Quote& m, const FIX::SessionID& sid) {
 
   const std::string dealer = sid.getTargetCompID().getString();
   const TimestampNs now = clock_();
+
+  // A new quote replaces the dealer's live one; remember which, to tell the client after.
+  std::vector<QuoteId> replaced;
+  if (const Rfq* before = engine_.find(*rfq_id)) {
+    for (const Quote& q : before->quotes) {
+      if (q.dealer_id == dealer && q.status == QuoteStatus::Active) replaced.push_back(q.id);
+    }
+  }
+
   const auto quoted = engine_.submit_quote(
       *rfq_id, QuoteInput{dealer, to_price(px), static_cast<Qty>(std::llround(size)), valid_until}, now);
   if (!quoted.ok()) return reject(sid, "S", to_string(quoted.error));
@@ -255,18 +318,21 @@ void FixGateway::onMessage(const FIX44::Quote& m, const FIX::SessionID& sid) {
   dealer_quote_index_[{dealer, dealer_quote_id.getString()}] = qid;
   rfq->second.quote_ids.push_back(qid);
 
+  for (const QuoteId old : replaced) quote_removed(rfq->second, old, "replaced by quote " + std::to_string(qid));
+
+  // Relay the price as stored (fixed-point), so the client sees exactly the price it would trade at.
+  const Quote& stored = engine_.find(*rfq_id)->quotes.back();
   FIX44::Quote out{FIX::QuoteID(std::to_string(qid))};
   out.set(FIX::QuoteReqID(rfq->second.client_req_id));
   out.set(FIX::Symbol(rfq->second.symbol));
   if (buy) {
-    out.set(FIX::OfferPx(px));
-    out.set(FIX::OfferSize(size));
+    out.set(FIX::OfferPx(from_price(stored.price)));
+    out.set(FIX::OfferSize(static_cast<double>(stored.qty)));
   } else {
-    out.set(FIX::BidPx(px));
-    out.set(FIX::BidSize(size));
+    out.set(FIX::BidPx(from_price(stored.price)));
+    out.set(FIX::BidSize(static_cast<double>(stored.qty)));
   }
-  const Rfq* state = engine_.find(*rfq_id);
-  out.set(FIX::ValidUntilTime(from_ns(state->quotes.back().valid_until)));
+  out.set(FIX::ValidUntilTime(from_ns(stored.valid_until)));
   send(out, rfq->second.client);
 
   if (observer_) {
@@ -305,6 +371,7 @@ void FixGateway::onMessage(const FIX44::QuoteResponse& m, const FIX::SessionID& 
               e.price, e.qty, dealer_text);
   exec_report(quote->second.dealer_session, std::to_string(*qid), quote->second.dealer_quote_id, 'F', '2',
               opposite_fix_side(info.side), info.symbol, e.price, e.qty, "");
+  rfq_closed(rfq_id, info, kQuoteStatusRemovedFromMarket, "traded away", e.dealer_id);
   if (observer_) {
     const std::chrono::duration<double> since = std::chrono::steady_clock::now() - info.received_at;
     observer_->on_executed(since.count());
@@ -320,8 +387,11 @@ void FixGateway::onMessage(const FIX44::QuoteCancel& m, const FIX::SessionID& si
     const std::string dealer = sid.getTargetCompID().getString();
     const auto it = dealer_quote_index_.find({dealer, quote_id.getString()});
     if (it == dealer_quote_index_.end()) return reject(sid, "Z", "unknown QuoteID");
-    const ErrorCode rc = engine_.withdraw_quote(it->second, clock_());
-    if (rc != ErrorCode::Ok) reject(sid, "Z", to_string(rc));
+    const QuoteId qid = it->second;
+    const ErrorCode rc = engine_.withdraw_quote(qid, clock_());
+    if (rc != ErrorCode::Ok) return reject(sid, "Z", to_string(rc));
+    const auto rfq = rfqs_.find(quotes_.at(qid).rfq_id);
+    if (rfq != rfqs_.end()) quote_removed(rfq->second, qid, "withdrawn by dealer");
     return;
   }
 
@@ -336,6 +406,7 @@ void FixGateway::onMessage(const FIX44::QuoteCancel& m, const FIX::SessionID& si
   if (rc != ErrorCode::Ok) return reject(sid, "Z", to_string(rc));
 
   exec_report(sid, std::to_string(rfq_id), info.client_req_id, '4', '4', fix_side(info.side), info.symbol, 0, 0, "");
+  rfq_closed(rfq_id, info, kQuoteStatusRemovedFromMarket, "RFQ cancelled by client");
   if (observer_) observer_->on_cancelled();
   forget(rfq_id);
 }
@@ -348,6 +419,7 @@ void FixGateway::tick() {
     const RfqInfo& info = it->second;
     exec_report(info.client, std::to_string(rfq_id), info.client_req_id, 'C', 'C', fix_side(info.side),
                 info.symbol, 0, 0, "RFQ expired");
+    rfq_closed(rfq_id, info, kQuoteStatusExpired, "RFQ expired");
     if (observer_) observer_->on_expired();
     forget(rfq_id);
   }
