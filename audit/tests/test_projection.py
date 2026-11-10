@@ -47,6 +47,13 @@ def test_withdrawn_marks_quote():
     assert params == (9,)
 
 
+def test_superseded_marks_quote():
+    (sql, params), = statements_for(
+        {"type": "QUOTE_SUPERSEDED", "ts": 1, "rfq_id": 1, "quote_id": 9, "dealer_id": "D", "replaced_by": 10})
+    assert "SUPERSEDED" in sql
+    assert params == (9,)
+
+
 def test_unknown_type_is_rejected():
     with pytest.raises(ValueError):
         statements_for({"type": "NOPE", "ts": 1, "rfq_id": 1})

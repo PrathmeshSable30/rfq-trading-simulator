@@ -48,6 +48,12 @@ TEST(EventCodecTest, RoundTripsRemainingTypes) {
   ASSERT_TRUE(withdrawn.has_value());
   EXPECT_EQ(as<QuoteWithdrawn>(*withdrawn).quote_id, 12u);
 
+  const auto superseded = decode(encode(make(QuoteSuperseded{3, 12, "B", 13})));
+  ASSERT_TRUE(superseded.has_value());
+  EXPECT_STREQ(event_type(superseded->payload), "QUOTE_SUPERSEDED");
+  EXPECT_EQ(as<QuoteSuperseded>(*superseded).quote_id, 12u);
+  EXPECT_EQ(as<QuoteSuperseded>(*superseded).replaced_by, 13u);
+
   const auto executed = decode(encode(make(RfqExecuted{3, 12, "B", 100, 50})));
   ASSERT_TRUE(executed.has_value());
   EXPECT_EQ(as<RfqExecuted>(*executed).dealer_id, "B");

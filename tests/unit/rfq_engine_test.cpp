@@ -114,6 +114,21 @@ TEST_F(RfqEngineTest, NewQuoteSupersedesDealersPreviousQuote) {
 
   EXPECT_EQ(engine.best_quote(id, kT0 + 3)->id, second.value);
   EXPECT_EQ(engine.execute(id, first.value, kT0 + 3).error, ErrorCode::QuoteNotActive);
+
+  // created, received, superseded, received
+  ASSERT_EQ(events.size(), 4u);
+  const auto* superseded = std::get_if<QuoteSuperseded>(&events[2].payload);
+  ASSERT_NE(superseded, nullptr);
+  EXPECT_EQ(superseded->quote_id, first.value);
+  EXPECT_EQ(superseded->replaced_by, second.value);
+  EXPECT_NE(std::get_if<QuoteReceived>(&events[3].payload), nullptr);
+}
+
+TEST_F(RfqEngineTest, WithdrawalIsReportedAsWithdrawnNotSuperseded) {
+  const RfqId id = open_rfq();
+  const auto q = engine.submit_quote(id, make_quote("A", 100), kT0 + 1);
+  ASSERT_EQ(engine.withdraw_quote(q.value, kT0 + 2), ErrorCode::Ok);
+  EXPECT_NE(std::get_if<QuoteWithdrawn>(&events.back().payload), nullptr);
 }
 
 TEST_F(RfqEngineTest, WithdrawnQuoteIsNotBestAndCannotBeExecuted) {

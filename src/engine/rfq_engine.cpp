@@ -67,15 +67,16 @@ Result<QuoteId> RfqEngine::submit_quote(RfqId rfq_id, QuoteInput input, Timestam
     return {ErrorCode::InvalidQuote, 0};
   }
 
+  const QuoteId new_id = next_quote_id_++;
   for (Quote& previous : rfq.quotes) {
     if (previous.dealer_id == input.dealer_id && previous.status == QuoteStatus::Active) {
       previous.status = QuoteStatus::Superseded;
-      emit(now, QuoteWithdrawn{rfq_id, previous.id, previous.dealer_id});
+      emit(now, QuoteSuperseded{rfq_id, previous.id, previous.dealer_id, new_id});
     }
   }
 
   Quote quote;
-  quote.id = next_quote_id_++;
+  quote.id = new_id;
   quote.rfq_id = rfq_id;
   quote.dealer_id = std::move(input.dealer_id);
   quote.price = input.price;

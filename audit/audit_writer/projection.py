@@ -43,6 +43,9 @@ def statements_for(event: dict) -> list[Statement]:
     if kind == "QUOTE_WITHDRAWN":
         return [("UPDATE quotes SET status = 'WITHDRAWN' WHERE quote_id = %s", (event["quote_id"],))]
 
+    if kind == "QUOTE_SUPERSEDED":
+        return [("UPDATE quotes SET status = 'SUPERSEDED' WHERE quote_id = %s", (event["quote_id"],))]
+
     if kind == "RFQ_EXECUTED":
         return [
             ("UPDATE quotes SET status = 'EXECUTED' WHERE quote_id = %s", (event["quote_id"],)),

@@ -12,6 +12,7 @@ using nlohmann::json;
 constexpr const char* kCreated = "RFQ_CREATED";
 constexpr const char* kQuoteReceived = "QUOTE_RECEIVED";
 constexpr const char* kQuoteWithdrawn = "QUOTE_WITHDRAWN";
+constexpr const char* kQuoteSuperseded = "QUOTE_SUPERSEDED";
 constexpr const char* kExecuted = "RFQ_EXECUTED";
 constexpr const char* kExpired = "RFQ_EXPIRED";
 constexpr const char* kCancelled = "RFQ_CANCELLED";
@@ -42,6 +43,13 @@ void fill(json& j, const QuoteWithdrawn& p) {
   j["dealer_id"] = p.dealer_id;
 }
 
+void fill(json& j, const QuoteSuperseded& p) {
+  j["rfq_id"] = p.rfq_id;
+  j["quote_id"] = p.quote_id;
+  j["dealer_id"] = p.dealer_id;
+  j["replaced_by"] = p.replaced_by;
+}
+
 void fill(json& j, const RfqExecuted& p) {
   j["rfq_id"] = p.rfq_id;
   j["quote_id"] = p.quote_id;
@@ -67,6 +75,9 @@ EventPayload parse_payload(const std::string& type, const json& j) {
   if (type == kQuoteWithdrawn) {
     return QuoteWithdrawn{j.at("rfq_id"), j.at("quote_id"), j.at("dealer_id")};
   }
+  if (type == kQuoteSuperseded) {
+    return QuoteSuperseded{j.at("rfq_id"), j.at("quote_id"), j.at("dealer_id"), j.at("replaced_by")};
+  }
   if (type == kExecuted) {
     return RfqExecuted{j.at("rfq_id"), j.at("quote_id"), j.at("dealer_id"), j.at("price"),
                        j.at("qty")};
@@ -83,6 +94,7 @@ const char* event_type(const EventPayload& payload) {
     const char* operator()(const RfqCreated&) const { return kCreated; }
     const char* operator()(const QuoteReceived&) const { return kQuoteReceived; }
     const char* operator()(const QuoteWithdrawn&) const { return kQuoteWithdrawn; }
+    const char* operator()(const QuoteSuperseded&) const { return kQuoteSuperseded; }
     const char* operator()(const RfqExecuted&) const { return kExecuted; }
     const char* operator()(const RfqExpired&) const { return kExpired; }
     const char* operator()(const RfqCancelled&) const { return kCancelled; }

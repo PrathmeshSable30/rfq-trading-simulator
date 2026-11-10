@@ -98,6 +98,11 @@ void RedisStateStore::on_event(const Event& event) {
       self.command({"HSET", quote_key(p.quote_id), "status", "WITHDRAWN"});
     }
 
+    void operator()(const QuoteSuperseded& p) const {
+      self.command({"HSET", quote_key(p.quote_id), "status", "SUPERSEDED", "replaced_by",
+                    std::to_string(p.replaced_by)});
+    }
+
     void operator()(const RfqExecuted& p) const {
       self.command({"HSET", quote_key(p.quote_id), "status", "EXECUTED"});
       self.command({"HSET", rfq_key(p.rfq_id), "state", "EXECUTED", "executed_quote_id",
